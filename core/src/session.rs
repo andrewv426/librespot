@@ -3,7 +3,6 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    process::exit,
     sync::{Arc, OnceLock, RwLock, Weak},
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -361,18 +360,6 @@ impl Session {
         );
     }
 
-    fn check_catalogue(attributes: &UserAttributes) {
-        if let Some(account_type) = attributes.get("type") {
-            if account_type != "premium" {
-                error!("librespot does not support {account_type:?} accounts.");
-                info!("Please support Spotify and your artists and sign up for a premium account.");
-
-                // TODO: logout instead of exiting
-                exit(1);
-            }
-        }
-    }
-
     pub fn send_packet(&self, cmd: PacketType, data: Vec<u8>) -> Result<(), Error> {
         match self.0.tx_connection.get() {
             Some(tx) => Ok(tx.send((cmd as u8, data))?),
@@ -595,10 +582,6 @@ impl Session {
     }
 
     pub fn set_user_attribute(&self, key: &str, value: &str) -> Option<String> {
-        let mut dummy_attributes = UserAttributes::new();
-        dummy_attributes.insert(key.to_owned(), value.to_owned());
-        Self::check_catalogue(&dummy_attributes);
-
         self.0
             .data
             .write()
@@ -609,8 +592,6 @@ impl Session {
     }
 
     pub fn set_user_attributes(&self, attributes: UserAttributes) {
-        Self::check_catalogue(&attributes);
-
         self.0
             .data
             .write()
@@ -844,7 +825,6 @@ where
                 }
 
                 trace!("Received product info: {user_attributes:#?}");
-                Session::check_catalogue(&user_attributes);
 
                 session
                     .0
@@ -953,5 +933,37 @@ where
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stores_non_premium_account_type() -> Result<(), Error> {
+        let session = Session::new(SessionConfig::default(), None);
+        let stream = futures_util::stream::empty::<Result<(u8, Bytes), io::Error>>();
+        let mut task = std::pin::pin!(DispatchTask::new(session.weak(), stream));
+
+        task.as_mut().dispatch(
+            &session,
+            PacketType::ProductInfo as u8,
+            Bytes::from_static(b"<products><product><type>free</type></product></products>"),
+        )?;
+        assert_eq!(session.get_user_attribute("type").as_deref(), Some("free"));
+
+        let previous_type = session.set_user_attribute("type", "premium");
+        assert_eq!(previous_type.as_deref(), Some("free"));
+        let previous_type = session.set_user_attribute("type", "free");
+        assert_eq!(previous_type.as_deref(), Some("premium"));
+        assert_eq!(session.get_user_attribute("type").as_deref(), Some("free"));
+
+        let previous_type = session.set_user_attribute("type", "premium");
+        assert_eq!(previous_type.as_deref(), Some("free"));
+        session.set_user_attributes(UserAttributes::from([("type".into(), "free".into())]));
+        assert_eq!(session.get_user_attribute("type").as_deref(), Some("free"));
+
+        Ok(())
     }
 }
